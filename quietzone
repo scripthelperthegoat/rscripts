@@ -1,0 +1,1221 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local monstersFolder = Workspace:WaitForChild("_Monsters")
+local itemsFolder = Workspace:WaitForChild("_Items")
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local running = true
+local infiniteStamina = false
+local sprintModifierEnabled = false
+local sprintSpeed = 32
+local playerESPEnabled = false
+local monsterESPEnabled = false
+local itemESPEnabled = false
+local fullbrightEnabled = false
+
+local staminaValue
+local staminaCharacter
+local staminaConnections = {}
+
+local sprintingValue
+local sprintHumanoid
+local sprintCharacter
+local sprintConnections = {}
+
+local characterAddedConnection
+local characterRemovingConnection
+
+local fullbrightConnections = {}
+local fullbrightOriginal
+local fullbrightEffects = {}
+
+local espEntries = {
+	Players = {},
+	Monsters = {},
+	Items = {}
+}
+
+local espConnections = {
+	Players = {},
+	Monsters = {},
+	Items = {}
+}
+
+local function disconnect(connection)
+	if connection and connection.Connected then
+		connection:Disconnect()
+	end
+end
+
+local function disconnectList(list)
+	for _, connection in ipairs(list) do
+		disconnect(connection)
+	end
+
+	table.clear(list)
+end
+
+local function getPart(instance)
+	if instance:IsA("BasePart") then
+		return instance
+	end
+
+	if instance:IsA("Model") and instance.PrimaryPart then
+		return instance.PrimaryPart
+	end
+
+	local rootPart = instance:FindFirstChild("HumanoidRootPart", true)
+
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+
+	local head = instance:FindFirstChild("Head", true)
+
+	if head and head:IsA("BasePart") then
+		return head
+	end
+
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getTopLevel(folder, instance)
+	local current = instance
+
+	while current and current.Parent and current.Parent ~= folder do
+		current = current.Parent
+	end
+
+	if current and current.Parent == folder then
+		return current
+	end
+end
+
+local function createBillboard(instance, text, offset)
+	local part = getPart(instance)
+
+	if not part then
+		return
+	end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "RoundExecutorESP"
+	billboard.Adornee = part
+	billboard.AlwaysOnTop = true
+	billboard.Size = UDim2.fromOffset(240, 36)
+	billboard.StudsOffsetWorldSpace = Vector3.new(0, offset or 3, 0)
+	billboard.Parent = part
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextStrokeTransparency = 0.3
+	label.TextSize = 14
+	label.Font = Enum.Font.GothamBold
+	label.Parent = billboard
+
+	return billboard, label, part
+end
+
+local function createHighlight(instance, color)
+	local adornee = instance
+
+	if not instance:IsA("Model") and not instance:IsA("BasePart") then
+		adornee = getPart(instance)
+	end
+
+	if not adornee then
+		return
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "RoundExecutorHighlight"
+	highlight.Adornee = adornee
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillColor = color
+	highlight.FillTransparency = 0.8
+	highlight.OutlineColor = color
+	highlight.OutlineTransparency = 0
+	highlight.Parent = instance
+
+	return highlight
+end
+
+local function removeEntry(category, key)
+	local entry = espEntries[category][key]
+
+	if not entry then
+		return
+	end
+
+	if entry.Connections then
+		disconnectList(entry.Connections)
+	end
+
+	if entry.Instances then
+		for _, instance in ipairs(entry.Instances) do
+			if instance then
+				instance:Destroy()
+			end
+		end
+	end
+
+	espEntries[category][key] = nil
+end
+
+local function clearCategory(category)
+	disconnectList(espConnections[category])
+
+	local keys = {}
+
+	for key in pairs(espEntries[category]) do
+		table.insert(keys, key)
+	end
+
+	for _, key in ipairs(keys) do
+		removeEntry(category, key)
+	end
+end
+
+local function findStamina(character)
+	if not character then
+		return
+	end
+
+	local values = character:FindFirstChild("Values")
+
+	if not values then
+		return
+	end
+
+	local stamina = values:FindFirstChild("Stamina")
+
+	if stamina and (stamina:IsA("NumberValue") or stamina:IsA("IntValue")) then
+		return stamina
+	end
+end
+
+local function forceStamina()
+	if not running or not infiniteStamina then
+		return
+	end
+
+	if not staminaValue or not staminaValue.Parent then
+		return
+	end
+
+	if staminaValue.Value ~= 100 then
+		staminaValue.Value = 100
+	end
+end
+
+local function stopStamina()
+	disconnectList(staminaConnections)
+
+	staminaValue = nil
+	staminaCharacter = nil
+end
+
+local function startStamina(character)
+	stopStamina()
+
+	if not running or not infiniteStamina then
+		return
+	end
+
+	character = character or player.Character
+
+	if not character then
+		return
+	end
+
+	staminaCharacter = character
+
+	local value = findStamina(character)
+
+	if value then
+		staminaValue = value
+		staminaValue.Value = 100
+
+		table.insert(staminaConnections, staminaValue:GetPropertyChangedSignal("Value"):Connect(function()
+			forceStamina()
+		end))
+
+		table.insert(staminaConnections, staminaValue.AncestryChanged:Connect(function()
+			if not running or not infiniteStamina then
+				return
+			end
+
+			if staminaValue ~= value then
+				return
+			end
+
+			if not value:IsDescendantOf(character) then
+				task.defer(function()
+					if running and infiniteStamina and player.Character == character then
+						startStamina(character)
+					end
+				end)
+			end
+		end))
+	else
+		table.insert(staminaConnections, character.DescendantAdded:Connect(function(descendant)
+			if not running or not infiniteStamina then
+				return
+			end
+
+			if descendant.Name ~= "Stamina" then
+				return
+			end
+
+			if not descendant.Parent or descendant.Parent.Name ~= "Values" then
+				return
+			end
+
+			if not descendant:IsA("NumberValue") and not descendant:IsA("IntValue") then
+				return
+			end
+
+			task.defer(function()
+				if running and infiniteStamina and player.Character == character then
+					startStamina(character)
+				end
+			end)
+		end))
+	end
+
+	table.insert(staminaConnections, RunService.Heartbeat:Connect(function()
+		forceStamina()
+	end))
+
+	table.insert(staminaConnections, RunService.RenderStepped:Connect(function()
+		forceStamina()
+	end))
+
+	forceStamina()
+end
+
+local function findSprinting(character)
+	if not character then
+		return
+	end
+
+	local values = character:FindFirstChild("Values")
+
+	if not values then
+		return
+	end
+
+	local sprinting = values:FindFirstChild("Sprinting")
+
+	if sprinting and sprinting:IsA("BoolValue") then
+		return sprinting
+	end
+end
+
+local function forceSprintSpeed()
+	if not running or not sprintModifierEnabled then
+		return
+	end
+
+	if not sprintHumanoid or not sprintHumanoid.Parent then
+		return
+	end
+
+	if not sprintingValue or not sprintingValue.Parent then
+		return
+	end
+
+	if not sprintingValue.Value then
+		return
+	end
+
+	if sprintHumanoid.WalkSpeed ~= sprintSpeed then
+		sprintHumanoid.WalkSpeed = sprintSpeed
+	end
+end
+
+local function stopSprintModifier(restore)
+	if restore and sprintHumanoid and sprintHumanoid.Parent and sprintingValue and sprintingValue.Parent then
+		if sprintingValue.Value and sprintHumanoid.WalkSpeed ~= 32 then
+			sprintHumanoid.WalkSpeed = 32
+		end
+	end
+
+	disconnectList(sprintConnections)
+
+	sprintingValue = nil
+	sprintHumanoid = nil
+	sprintCharacter = nil
+end
+
+local function startSprintModifier(character)
+	stopSprintModifier(false)
+
+	if not running or not sprintModifierEnabled then
+		return
+	end
+
+	character = character or player.Character
+
+	if not character then
+		return
+	end
+
+	sprintCharacter = character
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local sprinting = findSprinting(character)
+
+	if humanoid and sprinting then
+		sprintHumanoid = humanoid
+		sprintingValue = sprinting
+
+		table.insert(sprintConnections, sprintingValue:GetPropertyChangedSignal("Value"):Connect(function()
+			if sprintingValue.Value then
+				forceSprintSpeed()
+			end
+		end))
+
+		table.insert(sprintConnections, sprintHumanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+			forceSprintSpeed()
+		end))
+
+		table.insert(sprintConnections, sprintingValue.AncestryChanged:Connect(function()
+			if not running or not sprintModifierEnabled then
+				return
+			end
+
+			if not sprintingValue:IsDescendantOf(character) then
+				task.defer(function()
+					if running and sprintModifierEnabled and player.Character == character then
+						startSprintModifier(character)
+					end
+				end)
+			end
+		end))
+
+		table.insert(sprintConnections, sprintHumanoid.AncestryChanged:Connect(function()
+			if not running or not sprintModifierEnabled then
+				return
+			end
+
+			if not sprintHumanoid:IsDescendantOf(character) then
+				task.defer(function()
+					if running and sprintModifierEnabled and player.Character == character then
+						startSprintModifier(character)
+					end
+				end)
+			end
+		end))
+	else
+		table.insert(sprintConnections, character.DescendantAdded:Connect(function(descendant)
+			if not running or not sprintModifierEnabled then
+				return
+			end
+
+			if descendant.Name == "Sprinting" or descendant:IsA("Humanoid") then
+				task.defer(function()
+					if running and sprintModifierEnabled and player.Character == character then
+						startSprintModifier(character)
+					end
+				end)
+			end
+		end))
+	end
+
+	table.insert(sprintConnections, RunService.Heartbeat:Connect(function()
+		forceSprintSpeed()
+	end))
+
+	forceSprintSpeed()
+end
+
+local function playerEntryValid(targetPlayer)
+	local entry = espEntries.Players[targetPlayer]
+
+	if not entry then
+		return false
+	end
+
+	if not targetPlayer.Character then
+		return false
+	end
+
+	if entry.Character ~= targetPlayer.Character then
+		return false
+	end
+
+	if not entry.Instances then
+		return false
+	end
+
+	for _, instance in ipairs(entry.Instances) do
+		if not instance or not instance.Parent then
+			return false
+		end
+	end
+
+	if not entry.Label or not entry.Label.Parent then
+		return false
+	end
+
+	if not entry.Humanoid or not entry.Humanoid.Parent then
+		return false
+	end
+
+	return true
+end
+
+local function addPlayerESP(targetPlayer, character)
+	if not running or not playerESPEnabled or targetPlayer == player then
+		return false
+	end
+
+	character = character or targetPlayer.Character
+
+	if not character or character ~= targetPlayer.Character then
+		return false
+	end
+
+	if playerEntryValid(targetPlayer) then
+		return true
+	end
+
+	removeEntry("Players", targetPlayer)
+
+	local humanoid = character:FindFirstChildWhichIsA("Humanoid", true)
+	local part = getPart(character)
+
+	if not humanoid or not part then
+		return false
+	end
+
+	local billboard, label = createBillboard(character, targetPlayer.Name, 3.5)
+	local highlight = createHighlight(character, Color3.fromRGB(80, 170, 255))
+
+	if not billboard or not highlight or not label then
+		if billboard then
+			billboard:Destroy()
+		end
+
+		if highlight then
+			highlight:Destroy()
+		end
+
+		return false
+	end
+
+	local entry = {
+		Character = character,
+		Humanoid = humanoid,
+		Label = label,
+		Instances = {
+			billboard,
+			highlight
+		},
+		Connections = {}
+	}
+
+	espEntries.Players[targetPlayer] = entry
+
+	local function update()
+		if not running or not playerESPEnabled then
+			return
+		end
+
+		if not label.Parent then
+			return
+		end
+
+		local health = math.max(0, math.floor(humanoid.Health + 0.5))
+		local maxHealth = math.max(0, math.floor(humanoid.MaxHealth + 0.5))
+
+		label.Text = string.format("%s | %d/%d HP", targetPlayer.Name, health, maxHealth)
+	end
+
+	update()
+
+	table.insert(entry.Connections, humanoid.HealthChanged:Connect(update))
+	table.insert(entry.Connections, humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(update))
+	table.insert(entry.Connections, targetPlayer:GetPropertyChangedSignal("Name"):Connect(update))
+
+	table.insert(entry.Connections, character.AncestryChanged:Connect(function()
+		if not character:IsDescendantOf(Workspace) then
+			removeEntry("Players", targetPlayer)
+		end
+	end))
+
+	return true
+end
+
+local function watchPlayer(targetPlayer)
+	if targetPlayer == player then
+		return
+	end
+
+	local function watchCharacter(character)
+		removeEntry("Players", targetPlayer)
+
+		task.defer(function()
+			if not running or not playerESPEnabled then
+				return
+			end
+
+			addPlayerESP(targetPlayer, character)
+		end)
+	end
+
+	if targetPlayer.Character then
+		watchCharacter(targetPlayer.Character)
+	end
+
+	table.insert(espConnections.Players, targetPlayer.CharacterAdded:Connect(function(character)
+		watchCharacter(character)
+	end))
+
+	table.insert(espConnections.Players, targetPlayer.CharacterRemoving:Connect(function()
+		removeEntry("Players", targetPlayer)
+	end))
+end
+
+local function setPlayerESP(enabled)
+	playerESPEnabled = enabled
+	clearCategory("Players")
+
+	if not enabled or not running then
+		return
+	end
+
+	for _, targetPlayer in ipairs(Players:GetPlayers()) do
+		watchPlayer(targetPlayer)
+	end
+
+	table.insert(espConnections.Players, Players.PlayerAdded:Connect(function(targetPlayer)
+		watchPlayer(targetPlayer)
+	end))
+
+	table.insert(espConnections.Players, Players.PlayerRemoving:Connect(function(targetPlayer)
+		removeEntry("Players", targetPlayer)
+	end))
+
+	local elapsed = 0
+
+	table.insert(espConnections.Players, RunService.Heartbeat:Connect(function(deltaTime)
+		if not running or not playerESPEnabled then
+			return
+		end
+
+		elapsed += deltaTime
+
+		if elapsed < 0.5 then
+			return
+		end
+
+		elapsed = 0
+
+		for _, targetPlayer in ipairs(Players:GetPlayers()) do
+			if targetPlayer ~= player and targetPlayer.Character then
+				if not playerEntryValid(targetPlayer) then
+					addPlayerESP(targetPlayer, targetPlayer.Character)
+				end
+			end
+		end
+	end))
+end
+
+local function addMonsterESP(monster)
+	if not running or not monsterESPEnabled then
+		return false
+	end
+
+	if espEntries.Monsters[monster] then
+		return true
+	end
+
+	if monster.Parent ~= monstersFolder then
+		return false
+	end
+
+	local humanoid = monster:FindFirstChildWhichIsA("Humanoid", true)
+
+	if not humanoid then
+		return false
+	end
+
+	local billboard, label, part = createBillboard(monster, monster.Name, 4)
+	local highlight = createHighlight(monster, Color3.fromRGB(255, 80, 80))
+
+	if not billboard or not highlight or not part then
+		if billboard then
+			billboard:Destroy()
+		end
+
+		if highlight then
+			highlight:Destroy()
+		end
+
+		return false
+	end
+
+	local entry = {
+		Instances = {
+			billboard,
+			highlight
+		},
+		Connections = {}
+	}
+
+	espEntries.Monsters[monster] = entry
+
+	local function update()
+		if not running or not monsterESPEnabled then
+			return
+		end
+
+		if not label.Parent then
+			return
+		end
+
+		local health = math.max(0, math.floor(humanoid.Health + 0.5))
+		local maxHealth = math.max(0, math.floor(humanoid.MaxHealth + 0.5))
+
+		label.Text = string.format("%s | %d/%d HP", monster.Name, health, maxHealth)
+	end
+
+	update()
+
+	table.insert(entry.Connections, humanoid.HealthChanged:Connect(update))
+	table.insert(entry.Connections, humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(update))
+	table.insert(entry.Connections, monster:GetPropertyChangedSignal("Name"):Connect(update))
+
+	table.insert(entry.Connections, humanoid.AncestryChanged:Connect(function()
+		if not running or not monsterESPEnabled then
+			return
+		end
+
+		if humanoid:IsDescendantOf(monster) then
+			return
+		end
+
+		removeEntry("Monsters", monster)
+
+		task.defer(function()
+			if monster:IsDescendantOf(monstersFolder) then
+				addMonsterESP(monster)
+			end
+		end)
+	end))
+
+	table.insert(entry.Connections, part.AncestryChanged:Connect(function()
+		if not running or not monsterESPEnabled then
+			return
+		end
+
+		if part:IsDescendantOf(monster) then
+			return
+		end
+
+		removeEntry("Monsters", monster)
+
+		task.defer(function()
+			if monster:IsDescendantOf(monstersFolder) then
+				addMonsterESP(monster)
+			end
+		end)
+	end))
+
+	return true
+end
+
+local function setMonsterESP(enabled)
+	monsterESPEnabled = enabled
+	clearCategory("Monsters")
+
+	if not enabled or not running then
+		return
+	end
+
+	for _, monster in ipairs(monstersFolder:GetChildren()) do
+		task.defer(function()
+			addMonsterESP(monster)
+		end)
+	end
+
+	table.insert(espConnections.Monsters, monstersFolder.ChildAdded:Connect(function(monster)
+		task.defer(function()
+			if monsterESPEnabled then
+				addMonsterESP(monster)
+			end
+		end)
+	end))
+
+	table.insert(espConnections.Monsters, monstersFolder.ChildRemoved:Connect(function(monster)
+		removeEntry("Monsters", monster)
+	end))
+
+	table.insert(espConnections.Monsters, monstersFolder.DescendantAdded:Connect(function(descendant)
+		if not running or not monsterESPEnabled then
+			return
+		end
+
+		local monster = getTopLevel(monstersFolder, descendant)
+
+		if not monster or espEntries.Monsters[monster] then
+			return
+		end
+
+		task.defer(function()
+			addMonsterESP(monster)
+		end)
+	end))
+end
+
+local function addItemESP(item)
+	if not running or not itemESPEnabled then
+		return false
+	end
+
+	if espEntries.Items[item] then
+		return true
+	end
+
+	if item.Parent ~= itemsFolder then
+		return false
+	end
+
+	local billboard, label, part = createBillboard(item, item.Name, 2)
+
+	if not billboard or not label or not part then
+		return false
+	end
+
+	local entry = {
+		Instances = {
+			billboard
+		},
+		Connections = {}
+	}
+
+	espEntries.Items[item] = entry
+
+	local function update()
+		if not running or not itemESPEnabled then
+			return
+		end
+
+		if label.Parent then
+			label.Text = item.Name
+		end
+	end
+
+	update()
+
+	table.insert(entry.Connections, item:GetPropertyChangedSignal("Name"):Connect(update))
+
+	table.insert(entry.Connections, part.AncestryChanged:Connect(function()
+		if not running or not itemESPEnabled then
+			return
+		end
+
+		if item:IsA("BasePart") then
+			return
+		end
+
+		if part:IsDescendantOf(item) then
+			return
+		end
+
+		removeEntry("Items", item)
+
+		task.defer(function()
+			if item:IsDescendantOf(itemsFolder) then
+				addItemESP(item)
+			end
+		end)
+	end))
+
+	return true
+end
+
+local function setItemESP(enabled)
+	itemESPEnabled = enabled
+	clearCategory("Items")
+
+	if not enabled or not running then
+		return
+	end
+
+	for _, item in ipairs(itemsFolder:GetChildren()) do
+		task.defer(function()
+			addItemESP(item)
+		end)
+	end
+
+	table.insert(espConnections.Items, itemsFolder.ChildAdded:Connect(function(item)
+		task.defer(function()
+			if itemESPEnabled then
+				addItemESP(item)
+			end
+		end)
+	end))
+
+	table.insert(espConnections.Items, itemsFolder.ChildRemoved:Connect(function(item)
+		removeEntry("Items", item)
+	end))
+
+	table.insert(espConnections.Items, itemsFolder.DescendantAdded:Connect(function(descendant)
+		if not running or not itemESPEnabled then
+			return
+		end
+
+		local item = getTopLevel(itemsFolder, descendant)
+
+		if not item or espEntries.Items[item] then
+			return
+		end
+
+		task.defer(function()
+			addItemESP(item)
+		end)
+	end))
+end
+
+local function saveEffect(effect)
+	if fullbrightEffects[effect] then
+		return
+	end
+
+	if effect:IsA("Atmosphere") then
+		fullbrightEffects[effect] = {
+			Type = "Atmosphere",
+			Density = effect.Density,
+			Offset = effect.Offset,
+			Haze = effect.Haze,
+			Glare = effect.Glare,
+			Color = effect.Color,
+			Decay = effect.Decay
+		}
+	elseif effect:IsA("ColorCorrectionEffect") then
+		fullbrightEffects[effect] = {
+			Type = "ColorCorrectionEffect",
+			Enabled = effect.Enabled
+		}
+	end
+end
+
+local function applyEffect(effect)
+	saveEffect(effect)
+
+	if effect:IsA("Atmosphere") then
+		effect.Density = 0
+		effect.Haze = 0
+		effect.Glare = 0
+	elseif effect:IsA("ColorCorrectionEffect") then
+		effect.Enabled = false
+	end
+end
+
+local function applyFullbright()
+	if not running or not fullbrightEnabled then
+		return
+	end
+
+	Lighting.Brightness = 3
+	Lighting.ClockTime = 14
+	Lighting.FogStart = 0
+	Lighting.FogEnd = 100000
+	Lighting.GlobalShadows = false
+	Lighting.Ambient = Color3.fromRGB(200, 200, 200)
+	Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+	Lighting.ExposureCompensation = 0.5
+
+	for effect in pairs(fullbrightEffects) do
+		if effect.Parent then
+			if effect:IsA("Atmosphere") then
+				effect.Density = 0
+				effect.Haze = 0
+				effect.Glare = 0
+			elseif effect:IsA("ColorCorrectionEffect") then
+				effect.Enabled = false
+			end
+		end
+	end
+end
+
+local function stopFullbright()
+	fullbrightEnabled = false
+	disconnectList(fullbrightConnections)
+
+	if fullbrightOriginal then
+		Lighting.Brightness = fullbrightOriginal.Brightness
+		Lighting.ClockTime = fullbrightOriginal.ClockTime
+		Lighting.FogStart = fullbrightOriginal.FogStart
+		Lighting.FogEnd = fullbrightOriginal.FogEnd
+		Lighting.GlobalShadows = fullbrightOriginal.GlobalShadows
+		Lighting.Ambient = fullbrightOriginal.Ambient
+		Lighting.OutdoorAmbient = fullbrightOriginal.OutdoorAmbient
+		Lighting.ExposureCompensation = fullbrightOriginal.ExposureCompensation
+	end
+
+	for effect, data in pairs(fullbrightEffects) do
+		if effect.Parent then
+			if data.Type == "Atmosphere" then
+				effect.Density = data.Density
+				effect.Offset = data.Offset
+				effect.Haze = data.Haze
+				effect.Glare = data.Glare
+				effect.Color = data.Color
+				effect.Decay = data.Decay
+			elseif data.Type == "ColorCorrectionEffect" then
+				effect.Enabled = data.Enabled
+			end
+		end
+	end
+
+	fullbrightOriginal = nil
+	table.clear(fullbrightEffects)
+end
+
+local function startFullbright()
+	stopFullbright()
+
+	if not running then
+		return
+	end
+
+	fullbrightEnabled = true
+
+	fullbrightOriginal = {
+		Brightness = Lighting.Brightness,
+		ClockTime = Lighting.ClockTime,
+		FogStart = Lighting.FogStart,
+		FogEnd = Lighting.FogEnd,
+		GlobalShadows = Lighting.GlobalShadows,
+		Ambient = Lighting.Ambient,
+		OutdoorAmbient = Lighting.OutdoorAmbient,
+		ExposureCompensation = Lighting.ExposureCompensation
+	}
+
+	for _, effect in ipairs(Lighting:GetChildren()) do
+		applyEffect(effect)
+	end
+
+	table.insert(fullbrightConnections, Lighting.ChildAdded:Connect(function(effect)
+		if fullbrightEnabled then
+			applyEffect(effect)
+		end
+	end))
+
+	table.insert(fullbrightConnections, RunService.RenderStepped:Connect(function()
+		applyFullbright()
+	end))
+
+	applyFullbright()
+end
+
+local function killScript()
+	if not running then
+		return
+	end
+
+	running = false
+
+	infiniteStamina = false
+	sprintModifierEnabled = false
+	playerESPEnabled = false
+	monsterESPEnabled = false
+	itemESPEnabled = false
+
+	stopStamina()
+	stopSprintModifier(true)
+	stopFullbright()
+
+	disconnect(characterAddedConnection)
+	disconnect(characterRemovingConnection)
+
+	characterAddedConnection = nil
+	characterRemovingConnection = nil
+
+	clearCategory("Players")
+	clearCategory("Monsters")
+	clearCategory("Items")
+
+	Rayfield:Destroy()
+end
+
+local Window = Rayfield:CreateWindow({
+	Name = "Round Executor",
+	Icon = 0,
+	LoadingTitle = "Round Executor",
+	LoadingSubtitle = "Client Environment",
+	ShowText = "Executor",
+	Theme = "Default",
+	ToggleUIKeybind = "K",
+	DisableRayfieldPrompts = false,
+	DisableBuildWarnings = false,
+
+	ConfigurationSaving = {
+		Enabled = false,
+		FolderName = nil,
+		FileName = "RoundExecutor"
+	},
+
+	Discord = {
+		Enabled = false
+	},
+
+	KeySystem = false
+})
+
+local PlayerTab = Window:CreateTab("Player", "user")
+local ESPTab = Window:CreateTab("ESP", "eye")
+local SettingsTab = Window:CreateTab("Settings", "settings")
+
+PlayerTab:CreateSection("Movement")
+
+PlayerTab:CreateToggle({
+	Name = "Infinite Stamina",
+	CurrentValue = false,
+	Flag = "InfiniteStamina",
+
+	Callback = function(value)
+		if not running then
+			return
+		end
+
+		infiniteStamina = value
+
+		if value then
+			startStamina(player.Character)
+		else
+			stopStamina()
+		end
+	end
+})
+
+PlayerTab:CreateSlider({
+	Name = "Sprint Speed",
+	Range = {32, 57},
+	Increment = 1,
+	Suffix = "",
+	CurrentValue = 32,
+	Flag = "SprintSpeed",
+
+	Callback = function(value)
+		if not running then
+			return
+		end
+
+		sprintSpeed = value
+
+		if sprintModifierEnabled then
+			forceSprintSpeed()
+		end
+	end
+})
+
+PlayerTab:CreateToggle({
+	Name = "Sprint Modifier",
+	CurrentValue = false,
+	Flag = "SprintModifier",
+
+	Callback = function(value)
+		if not running then
+			return
+		end
+
+		sprintModifierEnabled = value
+
+		if value then
+			startSprintModifier(player.Character)
+		else
+			stopSprintModifier(true)
+		end
+	end
+})
+
+ESPTab:CreateSection("ESP")
+
+ESPTab:CreateToggle({
+	Name = "Player ESP",
+	CurrentValue = false,
+	Flag = "PlayerESP",
+
+	Callback = function(value)
+		setPlayerESP(value)
+	end
+})
+
+ESPTab:CreateToggle({
+	Name = "Monster ESP",
+	CurrentValue = false,
+	Flag = "MonsterESP",
+
+	Callback = function(value)
+		setMonsterESP(value)
+	end
+})
+
+ESPTab:CreateToggle({
+	Name = "Item ESP",
+	CurrentValue = false,
+	Flag = "ItemESP",
+
+	Callback = function(value)
+		setItemESP(value)
+	end
+})
+
+ESPTab:CreateSection("Visuals")
+
+ESPTab:CreateToggle({
+	Name = "Fullbright",
+	CurrentValue = false,
+	Flag = "Fullbright",
+
+	Callback = function(value)
+		if value then
+			startFullbright()
+		else
+			stopFullbright()
+		end
+	end
+})
+
+SettingsTab:CreateSection("Script")
+
+SettingsTab:CreateButton({
+	Name = "Kill Script",
+
+	Callback = function()
+		killScript()
+	end
+})
+
+characterAddedConnection = player.CharacterAdded:Connect(function(character)
+	if infiniteStamina then
+		startStamina(character)
+	end
+
+	if sprintModifierEnabled then
+		startSprintModifier(character)
+	end
+end)
+
+characterRemovingConnection = player.CharacterRemoving:Connect(function(character)
+	if infiniteStamina and staminaCharacter == character then
+		stopStamina()
+	end
+
+	if sprintModifierEnabled and sprintCharacter == character then
+		stopSprintModifier(false)
+	end
+end)
