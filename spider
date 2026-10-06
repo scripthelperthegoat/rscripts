@@ -1,0 +1,950 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local Lighting = game:GetService("Lighting")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"))()
+
+local Theme = {
+    Accent = Color3.fromRGB(139, 108, 255),
+    Red = Color3.fromRGB(235, 91, 108),
+    ItemText = Color3.fromRGB(255, 215, 0)
+}
+
+local SpiderHub = {
+    Running = true,
+    Connections = {},
+    HumanoidDefaults = {},
+    CollisionDefaults = {},
+    LightingDefaults = nil,
+    ActivePickup = nil,
+    ESP_DB = {
+        Players = {},
+        Items = {}
+    },
+    Flags = {
+        Noclip = false,
+        ESP_Player = false,
+        ESP_Item = false,
+        InfiniteJump = false,
+        WalkSpeed = 16,
+        JumpPower = 0,
+        Fullbright = false
+    }
+}
+
+local Window
+local windowDestroyed = false
+local closeDialogOpen = false
+local itemsFolder
+local itemsByLabel = {}
+local selectedItem
+local ItemDropdown
+local ItemStatus
+local CollectButton
+
+local function Disconnect(connection)
+    if connection and connection.Connected then
+        connection:Disconnect()
+    end
+end
+
+local function Notify(title, content, icon)
+    if SpiderHub.Running then
+        WindUI:Notify({
+            Title = title,
+            Content = content,
+            Icon = icon or "info",
+            Duration = 4
+        })
+    end
+end
+
+local function SetHumanoidProperty(humanoid, property, value)
+    local defaults = SpiderHub.HumanoidDefaults[humanoid]
+
+    if not defaults then
+        defaults = {}
+        SpiderHub.HumanoidDefaults[humanoid] = defaults
+    end
+
+    if defaults[property] == nil then
+        defaults[property] = humanoid[property]
+    end
+
+    humanoid[property] = value
+end
+
+local function RestoreMovement(character)
+    for humanoid, defaults in pairs(SpiderHub.HumanoidDefaults) do
+        if not character or humanoid:IsDescendantOf(character) then
+            if humanoid.Parent then
+                for property, value in pairs(defaults) do
+                    humanoid[property] = value
+                end
+            end
+
+            SpiderHub.HumanoidDefaults[humanoid] = nil
+        end
+    end
+end
+
+local function FixCollision(character)
+    for part, canCollide in pairs(SpiderHub.CollisionDefaults) do
+        if not character or part:IsDescendantOf(character) then
+            if part.Parent then
+                part.CanCollide = canCollide
+            end
+
+            SpiderHub.CollisionDefaults[part] = nil
+        end
+    end
+end
+
+local function RestoreLighting()
+    if not SpiderHub.LightingDefaults then
+        return
+    end
+
+    for property, value in pairs(SpiderHub.LightingDefaults) do
+        Lighting[property] = value
+    end
+
+    SpiderHub.LightingDefaults = nil
+end
+
+local function ApplyFullbright()
+    Lighting.Brightness = 2
+    Lighting.ClockTime = 14
+    Lighting.FogEnd = 100000
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+end
+
+local function ToggleFullbright(state)
+    if not SpiderHub.Running then
+        return
+    end
+
+    SpiderHub.Flags.Fullbright = state
+
+    if state then
+        if not SpiderHub.LightingDefaults then
+            SpiderHub.LightingDefaults = {
+                Brightness = Lighting.Brightness,
+                ClockTime = Lighting.ClockTime,
+                FogEnd = Lighting.FogEnd,
+                GlobalShadows = Lighting.GlobalShadows,
+                Ambient = Lighting.Ambient
+            }
+        end
+
+        ApplyFullbright()
+    else
+        RestoreLighting()
+    end
+end
+
+local function ToggleNoclip(state)
+    if not SpiderHub.Running then
+        return
+    end
+
+    SpiderHub.Flags.Noclip = state
+    Disconnect(SpiderHub.Connections.Noclip)
+    SpiderHub.Connections.Noclip = nil
+
+    if state then
+        SpiderHub.Connections.Noclip = RunService.Stepped:Connect(function()
+            local character = LocalPlayer.Character
+
+            if not SpiderHub.Running or not SpiderHub.Flags.Noclip or not character then
+                return
+            end
+
+            for _, part in ipairs(character:GetDescendants()) do
+                if part:IsA("BasePart") and not part:FindFirstAncestorOfClass("Tool") and part.CanCollide then
+                    if SpiderHub.CollisionDefaults[part] == nil then
+                        SpiderHub.CollisionDefaults[part] = part.CanCollide
+                    end
+
+                    part.CanCollide = false
+                end
+            end
+        end)
+    else
+        FixCollision()
+    end
+end
+
+local function EscapeRichText(text)
+    local escaped = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+    return escaped
+end
+
+local function GetInventoryString(targetPlayer)
+    local items = {}
+    local seen = {}
+    local character = targetPlayer.Character
+    local backpack = targetPlayer:FindFirstChildOfClass("Backpack")
+
+    if character then
+        for _, tool in ipairs(character:GetChildren()) do
+            if tool:IsA("Tool") and not seen[tool.Name] then
+                table.insert(items, "[" .. EscapeRichText(tool.Name) .. "]")
+                seen[tool.Name] = true
+            end
+        end
+    end
+
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") and not seen[tool.Name] then
+                table.insert(items, EscapeRichText(tool.Name))
+                seen[tool.Name] = true
+            end
+        end
+    end
+
+    if #items > 0 then
+        return table.concat(items, " + ")
+    end
+
+    return nil
+end
+
+local function RemoveESP(category, key)
+    local entry = SpiderHub.ESP_DB[category][key]
+
+    if not entry then
+        return
+    end
+
+    if entry.Highlight then
+        entry.Highlight:Destroy()
+    end
+
+    if entry.Billboard then
+        entry.Billboard:Destroy()
+    end
+
+    SpiderHub.ESP_DB[category][key] = nil
+end
+
+local function ClearESP(category)
+    for key in pairs(SpiderHub.ESP_DB[category]) do
+        RemoveESP(category, key)
+    end
+end
+
+local function ClearAllESP()
+    ClearESP("Players")
+    ClearESP("Items")
+end
+
+local function GetESPPart(model)
+    local part = model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("Handle")
+        or model.PrimaryPart
+        or model:FindFirstChild("Hitbox")
+
+    if part and part:IsA("BasePart") then
+        return part
+    end
+
+    return model:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function CreateESPObj(model, color, name)
+    local root = GetESPPart(model)
+
+    if not root then
+        return nil
+    end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "SpiderESP_H"
+    highlight.FillColor = color
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    highlight.FillTransparency = 0.6
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Adornee = model
+    highlight.Parent = CoreGui
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "SpiderESP_B"
+    billboard.Adornee = root
+    billboard.Size = UDim2.fromOffset(240, 60)
+    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = CoreGui
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "MainText"
+    textLabel.Size = UDim2.fromScale(1, 1)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = EscapeRichText(name)
+    textLabel.TextColor3 = color
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.TextStrokeTransparency = 0
+    textLabel.TextSize = 13
+    textLabel.RichText = true
+    textLabel.Parent = billboard
+
+    return {
+        Highlight = highlight,
+        Billboard = billboard,
+        Root = root,
+        Model = model,
+        TextLabel = textLabel
+    }
+end
+
+local function ESP_Loop()
+    if not SpiderHub.Running then
+        return
+    end
+
+    if SpiderHub.Flags.ESP_Player then
+        for targetPlayer, entry in pairs(SpiderHub.ESP_DB.Players) do
+            if not targetPlayer.Parent or targetPlayer.Character ~= entry.Model or not entry.Model.Parent or not entry.Root.Parent then
+                RemoveESP("Players", targetPlayer)
+            end
+        end
+
+        for _, targetPlayer in ipairs(Players:GetPlayers()) do
+            if targetPlayer ~= LocalPlayer and targetPlayer.Character and targetPlayer.Character.Parent then
+                local entry = SpiderHub.ESP_DB.Players[targetPlayer]
+
+                if not entry then
+                    entry = CreateESPObj(targetPlayer.Character, Theme.Red, targetPlayer.Name)
+                    SpiderHub.ESP_DB.Players[targetPlayer] = entry
+                end
+
+                if entry then
+                    local inventory = GetInventoryString(targetPlayer)
+                    local name = EscapeRichText(targetPlayer.Name)
+
+                    if inventory then
+                        entry.TextLabel.Text = name .. "\n<font size='11' color='rgb(255,215,0)'>" .. inventory .. "</font>"
+                    else
+                        entry.TextLabel.Text = name
+                    end
+                end
+            end
+        end
+    else
+        ClearESP("Players")
+    end
+
+    local folder = Workspace:FindFirstChild("Items")
+
+    if SpiderHub.Flags.ESP_Item and folder then
+        for item, entry in pairs(SpiderHub.ESP_DB.Items) do
+            if item.Parent ~= folder or not entry.Root.Parent or not entry.Root:IsDescendantOf(item) then
+                RemoveESP("Items", item)
+            end
+        end
+
+        for _, item in ipairs(folder:GetChildren()) do
+            if item:IsA("Model") and not SpiderHub.ESP_DB.Items[item] then
+                SpiderHub.ESP_DB.Items[item] = CreateESPObj(item, Theme.Accent, item.Name)
+            end
+        end
+    else
+        ClearESP("Items")
+    end
+end
+
+local function RestorePickupPosition(pickup)
+    if not pickup or pickup.Restored then
+        return
+    end
+
+    pickup.Restored = true
+
+    if LocalPlayer.Character == pickup.Character and pickup.Root.Parent and pickup.Character.PrimaryPart == pickup.Root then
+        pickup.Character:SetPrimaryPartCFrame(pickup.OriginalCFrame)
+    end
+
+    if pickup.Completed and SpiderHub.ActivePickup == pickup then
+        SpiderHub.ActivePickup = nil
+    end
+end
+
+local function CancelPickup()
+    local pickup = SpiderHub.ActivePickup
+
+    if not pickup then
+        return
+    end
+
+    if pickup.Thread and coroutine.status(pickup.Thread) ~= "dead" then
+        task.cancel(pickup.Thread)
+    end
+
+    pickup.Completed = true
+    RestorePickupPosition(pickup)
+    SpiderHub.ActivePickup = nil
+end
+
+local function SecureTeleportAndSwap(itemModel)
+    if not SpiderHub.Running then
+        return
+    end
+
+    if SpiderHub.ActivePickup then
+        Notify("Pickup in Progress", "Wait for the current item pickup to finish.", "clock")
+        return
+    end
+
+    local folder = Workspace:FindFirstChild("Items")
+    local character = LocalPlayer.Character
+
+    if not itemModel or itemModel.Parent ~= folder or not folder then
+        Notify("Item Unavailable", "This item is no longer available. Select another item.", "triangle-alert")
+        return
+    end
+
+    local targetPart = itemModel:FindFirstChild("Hitbox") or itemModel:FindFirstChild("Handle")
+    local modules = ReplicatedStorage:FindFirstChild("modules")
+    local up = modules and modules:FindFirstChild("up")
+    local network = up and up:FindFirstChild("Network")
+    local remote = network and network:FindFirstChild("RemoteFunction")
+
+    if not targetPart or not targetPart:IsA("BasePart") or not character or not character.PrimaryPart then
+        Notify("Pickup Unavailable", "The item or your character is not ready yet.", "triangle-alert")
+        return
+    end
+
+    if not remote or not remote:IsA("RemoteFunction") then
+        Notify("Pickup Unavailable", "The game's item pickup connection is unavailable.", "triangle-alert")
+        return
+    end
+
+    local pickup = {
+        Character = character,
+        Root = character.PrimaryPart,
+        OriginalCFrame = character.PrimaryPart.CFrame,
+        Restored = false,
+        Completed = false
+    }
+
+    SpiderHub.ActivePickup = pickup
+    character:SetPrimaryPartCFrame(targetPart.CFrame)
+
+    pickup.Thread = task.spawn(function()
+        for _ = 1, 10 do
+            if not SpiderHub.Running or LocalPlayer.Character ~= character or itemModel.Parent ~= folder or not targetPart:IsDescendantOf(itemModel) then
+                break
+            end
+
+            pcall(function()
+                remote:InvokeServer("AttemptSwapItems", targetPart)
+            end)
+
+            RunService.Heartbeat:Wait()
+        end
+
+        pickup.Completed = true
+
+        if pickup.Restored and SpiderHub.ActivePickup == pickup then
+            SpiderHub.ActivePickup = nil
+        end
+    end)
+
+    task.wait(0.25)
+    RestorePickupPosition(pickup)
+end
+
+local function SetMovement(flag, value)
+    if not SpiderHub.Running then
+        return
+    end
+
+    SpiderHub.Flags[flag] = value
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        SetHumanoidProperty(humanoid, flag, value)
+    end
+end
+
+local function ApplyMovement()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+    if not humanoid then
+        return
+    end
+
+    if SpiderHub.Flags.WalkSpeed ~= 16 then
+        SetHumanoidProperty(humanoid, "WalkSpeed", SpiderHub.Flags.WalkSpeed)
+    end
+
+    if SpiderHub.Flags.JumpPower > 0 then
+        SetHumanoidProperty(humanoid, "JumpPower", SpiderHub.Flags.JumpPower)
+    end
+end
+
+local function UnloadScript()
+    if not SpiderHub.Running then
+        return
+    end
+
+    SpiderHub.Running = false
+    SpiderHub.Flags.Noclip = false
+    SpiderHub.Flags.ESP_Player = false
+    SpiderHub.Flags.ESP_Item = false
+    SpiderHub.Flags.InfiniteJump = false
+    SpiderHub.Flags.Fullbright = false
+
+    for _, connection in pairs(SpiderHub.Connections) do
+        Disconnect(connection)
+    end
+
+    table.clear(SpiderHub.Connections)
+    CancelPickup()
+    ClearAllESP()
+    RestoreMovement()
+    FixCollision()
+    RestoreLighting()
+    table.clear(itemsByLabel)
+    selectedItem = nil
+
+    if Window and not windowDestroyed then
+        windowDestroyed = true
+        Window:Destroy()
+    end
+end
+
+local function Rejoin()
+    if not SpiderHub.Running then
+        return
+    end
+
+    if #Players:GetPlayers() <= 1 then
+        LocalPlayer:Kick("\nRejoining...")
+        task.wait()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end
+end
+
+local function RequestUnload()
+    if not SpiderHub.Running or closeDialogOpen then
+        return
+    end
+
+    closeDialogOpen = true
+
+    Window:Dialog({
+        Title = "Unload Script?",
+        Content = "This will stop all features, restore movement, collision, and lighting, remove ESP, and close Spider Hub.",
+        Buttons = {
+            {
+                Title = "Cancel",
+                Variant = "Secondary",
+                Callback = function()
+                    closeDialogOpen = false
+                end
+            },
+            {
+                Title = "Unload Script",
+                Icon = "power",
+                Variant = "Primary",
+                Callback = function()
+                    closeDialogOpen = false
+                    UnloadScript()
+                end
+            }
+        }
+    })
+end
+
+local spiderTheme = table.clone(WindUI.Themes.Dark)
+spiderTheme.Name = "Spider"
+spiderTheme.Accent = Color3.fromRGB(35, 28, 52)
+spiderTheme.Background = Color3.fromRGB(17, 15, 24)
+spiderTheme.Dialog = Color3.fromRGB(28, 23, 40)
+spiderTheme.Text = Color3.fromRGB(240, 235, 250)
+spiderTheme.Placeholder = Color3.fromRGB(161, 151, 180)
+spiderTheme.Icon = Theme.Accent
+spiderTheme.Button = Color3.fromRGB(76, 53, 126)
+spiderTheme.Toggle = Theme.Accent
+spiderTheme.Slider = Theme.Accent
+spiderTheme.Checkbox = Theme.Accent
+spiderTheme.Primary = Theme.Accent
+spiderTheme.ElementBackground = Color3.fromRGB(37, 30, 49)
+WindUI:AddTheme(spiderTheme)
+
+Window = WindUI:CreateWindow({
+    Title = "Spider Hub",
+    Author = "TheRealRJ78",
+    Icon = "bug",
+    Folder = "SpiderHub",
+    Theme = "Spider",
+    Size = UDim2.fromOffset(660, 490),
+    SideBarWidth = 170,
+    NewElements = false,
+    ElementsRadius = 10,
+    Resizable = true,
+    Acrylic = false,
+    Transparent = false,
+    ToggleKey = Enum.KeyCode.RightControl,
+    IgnoreAlerts = false
+})
+
+Window:OnDestroy(function()
+    windowDestroyed = true
+    UnloadScript()
+end)
+
+local PlayerTab = Window:Tab({
+    Title = "Player",
+    Icon = "user",
+    IconColor = Theme.Accent
+})
+
+local ESPTab = Window:Tab({
+    Title = "ESP",
+    Icon = "eye",
+    IconColor = Theme.Red
+})
+
+local ItemsTab = Window:Tab({
+    Title = "Items",
+    Icon = "package",
+    IconColor = Theme.ItemText
+})
+
+local SettingsTab = Window:Tab({
+    Title = "Settings",
+    Icon = "settings",
+    IconColor = Color3.fromRGB(174, 165, 191)
+})
+
+PlayerTab:Section({
+    Title = "Movement",
+    Desc = "Speed, jump power, and movement options.",
+    Icon = "footprints",
+    TextSize = 20
+})
+
+PlayerTab:Space({Columns = 1})
+
+PlayerTab:Slider({
+    Title = "Walk Speed",
+    Desc = "Set your character's walking speed.",
+    Step = 1,
+    Value = {Min = 16, Max = 100, Default = 16},
+    Callback = function(value)
+        SetMovement("WalkSpeed", value)
+    end
+})
+
+PlayerTab:Slider({
+    Title = "Jump Power",
+    Desc = "Adjust your jump strength.",
+    Step = 1,
+    Value = {Min = 0, Max = 120, Default = 0},
+    Callback = function(value)
+        SetMovement("JumpPower", value)
+    end
+})
+
+PlayerTab:Toggle({
+    Title = "Infinite Jump",
+    Desc = "Jump again while in the air.",
+    Value = false,
+    Callback = function(value)
+        if SpiderHub.Running then
+            SpiderHub.Flags.InfiniteJump = value
+        end
+    end
+})
+
+PlayerTab:Toggle({
+    Title = "Noclip",
+    Desc = "Move through obstacles without changing equipped tools.",
+    Value = false,
+    Callback = ToggleNoclip
+})
+
+ESPTab:Section({
+    Title = "ESP",
+    Desc = "Player inventories and item locations update live.",
+    Icon = "radar",
+    TextSize = 20
+})
+
+ESPTab:Space({Columns = 1})
+
+ESPTab:Toggle({
+    Title = "Player ESP",
+    Desc = "Show player names and live inventories.",
+    Value = false,
+    Callback = function(value)
+        if SpiderHub.Running then
+            SpiderHub.Flags.ESP_Player = value
+
+            if not value then
+                ClearESP("Players")
+            end
+        end
+    end
+})
+
+ESPTab:Toggle({
+    Title = "Item ESP",
+    Desc = "Mark available items until they are collected.",
+    Value = false,
+    Callback = function(value)
+        if SpiderHub.Running then
+            SpiderHub.Flags.ESP_Item = value
+
+            if not value then
+                ClearESP("Items")
+            end
+        end
+    end
+})
+
+ESPTab:Space({Columns = 1})
+
+ESPTab:Section({
+    Title = "Lighting",
+    Icon = "sun",
+    TextSize = 20
+})
+
+ESPTab:Space({Columns = 1})
+
+ESPTab:Toggle({
+    Title = "Fullbright",
+    Desc = "Brighten the map and reduce fog and shadows.",
+    Value = false,
+    Callback = ToggleFullbright
+})
+
+ItemsTab:Section({
+    Title = "Teleport & Collect",
+    Desc = "Select an available item, collect it, and return to your position.",
+    Icon = "package",
+    TextSize = 20
+})
+
+ItemsTab:Space({Columns = 1})
+
+ItemStatus = ItemsTab:Paragraph({
+    Title = "Available Items",
+    Desc = "Waiting for the item list...",
+    Icon = "package"
+})
+
+ItemsTab:Space({Columns = 1})
+
+ItemDropdown = ItemsTab:Dropdown({
+    Title = "Select Item",
+    Desc = "The list updates when items appear or are collected.",
+    Values = {},
+    Multi = false,
+    AllowNone = true,
+    SearchBarEnabled = true,
+    Callback = function(label)
+        if SpiderHub.Running then
+            selectedItem = itemsByLabel[label]
+        end
+    end
+})
+
+CollectButton = ItemsTab:Button({
+    Title = "Collect Selected Item",
+    Desc = "Use the game's item swap interaction and return to your position.",
+    Icon = "package-check",
+    Callback = function()
+        SecureTeleportAndSwap(selectedItem)
+    end
+})
+
+local function RefreshItems()
+    if not SpiderHub.Running then
+        return
+    end
+
+    local models = {}
+    local nameCounts = {}
+    local labels = {}
+    local previousSelection = selectedItem
+    local selectedLabel
+
+    table.clear(itemsByLabel)
+
+    if itemsFolder and itemsFolder.Parent == Workspace then
+        for _, item in ipairs(itemsFolder:GetChildren()) do
+            if item:IsA("Model") then
+                table.insert(models, item)
+                nameCounts[item.Name] = (nameCounts[item.Name] or 0) + 1
+            end
+        end
+    end
+
+    table.sort(models, function(first, second)
+        return first.Name < second.Name
+    end)
+
+    local nameIndices = {}
+
+    for _, item in ipairs(models) do
+        local label = item.Name
+
+        if nameCounts[item.Name] > 1 then
+            nameIndices[item.Name] = (nameIndices[item.Name] or 0) + 1
+            label = item.Name .. " (" .. nameIndices[item.Name] .. ")"
+        end
+
+        while itemsByLabel[label] do
+            label = label .. " (item)"
+        end
+
+        itemsByLabel[label] = item
+        table.insert(labels, label)
+
+        if item == previousSelection then
+            selectedLabel = label
+        end
+    end
+
+    selectedItem = selectedLabel and itemsByLabel[selectedLabel] or nil
+    ItemDropdown.Value = selectedLabel
+    ItemDropdown:Refresh(labels)
+    ItemDropdown:Display()
+
+    if #labels > 0 then
+        ItemStatus:SetDesc(tostring(#labels) .. " item(s) available. The list updates automatically.")
+        ItemDropdown:Unlock()
+        CollectButton:Unlock()
+    else
+        ItemStatus:SetDesc("No items are currently available. The list will update when they appear.")
+        ItemDropdown:Lock()
+        CollectButton:Lock()
+    end
+end
+
+local function BindItemsFolder(folder)
+    Disconnect(SpiderHub.Connections.ItemAdded)
+    Disconnect(SpiderHub.Connections.ItemRemoved)
+    SpiderHub.Connections.ItemAdded = nil
+    SpiderHub.Connections.ItemRemoved = nil
+    itemsFolder = folder
+
+    if folder then
+        SpiderHub.Connections.ItemAdded = folder.ChildAdded:Connect(RefreshItems)
+        SpiderHub.Connections.ItemRemoved = folder.ChildRemoved:Connect(RefreshItems)
+    end
+
+    RefreshItems()
+end
+
+SettingsTab:Section({
+    Title = "Session",
+    Icon = "settings",
+    TextSize = 20
+})
+
+SettingsTab:Space({Columns = 1})
+
+SettingsTab:Paragraph({
+    Title = "Window Controls",
+    Desc = "Press Right Control to hide or show the window. The X and Unload Script require confirmation and restore the changes made by this script.",
+    Icon = "keyboard"
+})
+
+SettingsTab:Space({Columns = 1})
+
+SettingsTab:Button({
+    Title = "Rejoin Server",
+    Desc = "Rejoin the current server.",
+    Icon = "rotate-cw",
+    Callback = Rejoin
+})
+
+SettingsTab:Button({
+    Title = "Unload Script",
+    Desc = "Stop all features, restore the session, and close Spider Hub.",
+    Icon = "power",
+    Color = Color3.fromRGB(181, 65, 80),
+    Callback = RequestUnload
+})
+
+local movementElapsed = 0
+local lightingElapsed = 0
+
+SpiderHub.Connections.Heartbeat = RunService.Heartbeat:Connect(function(deltaTime)
+    if not SpiderHub.Running then
+        return
+    end
+
+    ESP_Loop()
+    movementElapsed = movementElapsed + deltaTime
+    lightingElapsed = lightingElapsed + deltaTime
+
+    if movementElapsed >= 0.5 then
+        movementElapsed = 0
+        ApplyMovement()
+    end
+
+    if lightingElapsed >= 1 then
+        lightingElapsed = 0
+
+        if SpiderHub.Flags.Fullbright then
+            ApplyFullbright()
+        end
+    end
+end)
+
+SpiderHub.Connections.JumpRequest = UserInputService.JumpRequest:Connect(function()
+    if not SpiderHub.Running or not SpiderHub.Flags.InfiniteJump then
+        return
+    end
+
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end)
+
+SpiderHub.Connections.CharacterRemoving = LocalPlayer.CharacterRemoving:Connect(function(character)
+    local pickup = SpiderHub.ActivePickup
+
+    if pickup and pickup.Character == character then
+        CancelPickup()
+    end
+
+    RestoreMovement(character)
+    FixCollision(character)
+end)
+
+SpiderHub.Connections.FolderAdded = Workspace.ChildAdded:Connect(function(child)
+    if child.Name == "Items" then
+        BindItemsFolder(Workspace:FindFirstChild("Items"))
+    end
+end)
+
+SpiderHub.Connections.FolderRemoved = Workspace.ChildRemoved:Connect(function(child)
+    if child == itemsFolder then
+        BindItemsFolder(Workspace:FindFirstChild("Items"))
+    end
+end)
+
+BindItemsFolder(Workspace:FindFirstChild("Items"))
