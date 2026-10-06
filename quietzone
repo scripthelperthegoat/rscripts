@@ -1052,10 +1052,10 @@ local function killScript()
 end
 
 local Window = Rayfield:CreateWindow({
-	Name = "Round Executor",
+	Name = "A Quiet Place: Deadzone",
 	Icon = 0,
-	LoadingTitle = "Round Executor",
-	LoadingSubtitle = "Client Environment",
+	LoadingTitle = "A Quiet Place: Deadzone",
+	LoadingSubtitle = "Basic Script",
 	ShowText = "Executor",
 	Theme = "Default",
 	ToggleUIKeybind = "K",
